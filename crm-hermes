@@ -1,0 +1,11 @@
+FROM python:3.12-slim AS base
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc git && rm -rf /var/lib/apt/lists/*
+COPY pyproject.toml README.md ./
+RUN pip install --no-cache-dir -e ".[messaging]" \
+ && pip install --no-cache-dir 'redis==5.2.1' 'google-cloud-secret-manager==2.21.1'
+COPY . .
+RUN pip install --no-cache-dir --no-deps -e .
+ENV PYTHONUNBUFFERED=1
+CMD ["hermes", "gateway"]
