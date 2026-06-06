@@ -11,6 +11,7 @@ from gateway.platforms.base import SendResult
 from gateway.platforms.telegram import TelegramAdapter
 
 from ._env import HERMES_OUTBOX_REDIS_URL_ENV, TENANT_ID_ENV, require_env
+from ._media import install_outbound_blockers
 from .hermes_outbox_writer import write_to_outbox
 
 log = logging.getLogger(__name__)
@@ -51,12 +52,19 @@ async def divert_telegram_to_outbox(
     return SendResult(success=True, message_id=str(xadd_id))
 
 
+@install_outbound_blockers
 class TelegramMindoraAdapter(TelegramAdapter):
     """Subclass that diverts outbound text to a Redis Stream.
 
     Reads two env vars (set by the deploy.yml service block in mindora-deploy):
       - TENANT_ID: tenant slug (testcust4, gft, ...)
       - HERMES_OUTBOX_REDIS_URL: redis://host:port/db
+
+    The @install_outbound_blockers decorator walks the parent MRO at
+    class-creation time and wraps every inherited send_* method (except
+    send / edit_message / send_typing) to return a no-op success +
+    WARNING log. Phase 2 outbox is text-only; non-text outbound (media,
+    interactive prompts, drafts, model picker, update prompts) is Phase 3.
     """
 
     # Parent TelegramAdapter sets this True, which makes hermes' streaming
@@ -106,3 +114,19 @@ class TelegramMindoraAdapter(TelegramAdapter):
             getattr(self, "_tenant_id", "?"), message_id, finalize,
         )
         return SendResult(success=True, message_id=message_id)
+
+    async def create_handoff_thread(
+        self,
+        parent_chat_id: str,
+        name: str,
+    ) -> Optional[str]:
+        # Sidecar invariant: side-effects on Telegram (e.g. forum-topic
+        # creation) must not bypass the outbox. The parent override calls
+        # Bot.create_forum_topic() directly. Returning None matches the
+        # base.py contract — hermes' handoff watcher falls back to using
+        # parent_chat_id directly without thread isolation.
+        log.debug(
+            "mindora_create_handoff_thread_blocked tenant=%s parent=%s name=%s",
+            getattr(self, "_tenant_id", "?"), parent_chat_id, name,
+        )
+        return None

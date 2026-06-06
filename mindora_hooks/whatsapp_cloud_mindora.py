@@ -11,6 +11,7 @@ from gateway.platforms.base import SendResult
 from gateway.platforms.whatsapp_cloud import WhatsAppCloudAdapter
 
 from ._env import HERMES_OUTBOX_REDIS_URL_ENV, TENANT_ID_ENV, require_env
+from ._media import install_outbound_blockers
 from .hermes_outbox_writer import write_to_outbox
 
 log = logging.getLogger(__name__)
@@ -52,12 +53,19 @@ async def divert_whatsapp_to_outbox(
     return SendResult(success=True, message_id=str(xadd_id))
 
 
+@install_outbound_blockers
 class WhatsAppCloudMindoraAdapter(WhatsAppCloudAdapter):
     """Subclass that diverts outbound text to a Redis Stream.
 
     Reads two env vars (set by the deploy.yml service block in mindora-deploy):
       - TENANT_ID: tenant slug (testcust4, gft, ...)
       - HERMES_OUTBOX_REDIS_URL: redis://host:port/db
+
+    The @install_outbound_blockers decorator walks the parent MRO at
+    class-creation time and wraps every inherited send_* method (except
+    send / edit_message / send_typing) to return a no-op success +
+    WARNING log. Phase 2 outbox is text-only; non-text outbound (media,
+    interactive prompts, drafts) is Phase 3.
     """
 
     # WhatsAppCloudAdapter inherits the base default (False), but pin it

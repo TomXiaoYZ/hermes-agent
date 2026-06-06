@@ -136,3 +136,195 @@ async def test_whatsapp_adapter_edit_message_is_noop():
     )
     assert result.success is True
     assert result.message_id == "m1"
+
+
+# ---------------------------------------------------------------------------
+# Sidecar invariant tests: ALL non-text inherited send_* methods must be
+# blocked by the @install_outbound_blockers class decorator. Phase 2 outbox
+# is text-only; media + interactive prompts + drafts are Phase 3.
+#
+# The decorator wraps every inherited send_* method (except send,
+# edit_message, send_typing) at class-creation time, so any new send_<foo>
+# upstream is automatically caught.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("method,args", [
+    # Round-3 media methods
+    ("send_image", {"chat_id": "c", "image_url": "https://x/y.png"}),
+    ("send_image_file", {"chat_id": "c", "image_path": "/tmp/x.png"}),
+    ("send_video", {"chat_id": "c", "video_path": "https://x/y.mp4"}),
+    ("send_voice", {"chat_id": "c", "audio_path": "https://x/y.ogg"}),
+    ("send_document", {"chat_id": "c", "file_path": "https://x/y.pdf"}),
+])
+@pytest.mark.asyncio
+async def test_whatsapp_media_methods_no_op(method, args):
+    from mindora_hooks.whatsapp_cloud_mindora import WhatsAppCloudMindoraAdapter
+    adapter = object.__new__(WhatsAppCloudMindoraAdapter)
+    adapter._tenant_id = "t1"
+    fn = getattr(adapter, method)
+    result = await fn(**args)
+    assert result.success is True
+    assert result.message_id is None
+
+
+@pytest.mark.parametrize("method,args", [
+    # Round-3 media methods
+    ("send_image", {"chat_id": "c", "image_url": "https://x/y.png"}),
+    ("send_image_file", {"chat_id": "c", "image_path": "/tmp/x.png"}),
+    ("send_video", {"chat_id": "c", "video_path": "https://x/y.mp4"}),
+    ("send_voice", {"chat_id": "c", "audio_path": "https://x/y.ogg"}),
+    ("send_document", {"chat_id": "c", "file_path": "https://x/y.pdf"}),
+    ("send_animation", {"chat_id": "c", "animation_url": "https://x/y.gif"}),
+])
+@pytest.mark.asyncio
+async def test_telegram_media_methods_no_op(method, args):
+    from mindora_hooks.telegram_mindora import TelegramMindoraAdapter
+    adapter = object.__new__(TelegramMindoraAdapter)
+    adapter._tenant_id = "t1"
+    fn = getattr(adapter, method)
+    result = await fn(**args)
+    assert result.success is True
+    assert result.message_id is None
+
+
+@pytest.mark.asyncio
+async def test_telegram_send_multiple_images_no_op():
+    """Catch-all wrapper returns SendResult — overrides the parent's None
+    return. Acceptable: callers that only checked `result is None` would
+    silently break, but the only caller surface here is hermes' run loop
+    which treats SendResult(success=True) and None as both non-fatal."""
+    from mindora_hooks.telegram_mindora import TelegramMindoraAdapter
+    adapter = object.__new__(TelegramMindoraAdapter)
+    adapter._tenant_id = "t1"
+    result = await adapter.send_multiple_images(
+        chat_id="c", images=[("https://x/1.png", "cap")],
+    )
+    assert result.success is True
+    assert result.message_id is None
+
+
+# ---------------------------------------------------------------------------
+# Round-4 additions: interactive prompts (send_clarify, send_exec_approval,
+# send_slash_confirm) and Telegram-only streaming/control surfaces
+# (send_draft, send_model_picker, send_update_prompt). All POST the platform
+# directly on the parent and must be neutralized.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("method,args", [
+    ("send_clarify", {
+        "chat_id": "c", "question": "pick one", "choices": ["a", "b"],
+        "clarify_id": "cl1", "session_key": "sk1",
+    }),
+    ("send_exec_approval", {
+        "chat_id": "c", "command": "rm -rf /", "session_key": "sk1",
+    }),
+    ("send_slash_confirm", {
+        "chat_id": "c", "title": "Confirm", "message": "ok?",
+        "session_key": "sk1", "confirm_id": "cf1",
+    }),
+    ("send_private_notice", {
+        "chat_id": "c", "user_id": "u1", "content": "fyi",
+    }),
+    ("send_draft", {
+        "chat_id": "c", "draft_id": 1, "content": "draft body",
+    }),
+])
+@pytest.mark.asyncio
+async def test_whatsapp_round4_methods_no_op(method, args):
+    from mindora_hooks.whatsapp_cloud_mindora import WhatsAppCloudMindoraAdapter
+    adapter = object.__new__(WhatsAppCloudMindoraAdapter)
+    adapter._tenant_id = "t1"
+    fn = getattr(adapter, method)
+    result = await fn(**args)
+    assert result.success is True
+    assert result.message_id is None
+
+
+@pytest.mark.parametrize("method,args", [
+    ("send_clarify", {
+        "chat_id": "c", "question": "pick one", "choices": ["a", "b"],
+        "clarify_id": "cl1", "session_key": "sk1",
+    }),
+    ("send_exec_approval", {
+        "chat_id": "c", "command": "rm -rf /", "session_key": "sk1",
+    }),
+    ("send_slash_confirm", {
+        "chat_id": "c", "title": "Confirm", "message": "ok?",
+        "session_key": "sk1", "confirm_id": "cf1",
+    }),
+    ("send_private_notice", {
+        "chat_id": "c", "user_id": "u1", "content": "fyi",
+    }),
+    ("send_draft", {
+        "chat_id": "c", "draft_id": 1, "content": "draft body",
+    }),
+    ("send_model_picker", {
+        "chat_id": "c", "providers": [], "current_model": "m",
+        "current_provider": "p", "session_key": "sk1",
+        "on_model_selected": lambda *_a, **_k: None,
+    }),
+    ("send_update_prompt", {
+        "chat_id": "c", "prompt": "update?", "default": "x",
+        "session_key": "sk1",
+    }),
+])
+@pytest.mark.asyncio
+async def test_telegram_round4_methods_no_op(method, args):
+    from mindora_hooks.telegram_mindora import TelegramMindoraAdapter
+    adapter = object.__new__(TelegramMindoraAdapter)
+    adapter._tenant_id = "t1"
+    fn = getattr(adapter, method)
+    result = await fn(**args)
+    assert result.success is True
+    assert result.message_id is None
+
+
+# ---------------------------------------------------------------------------
+# Guard test: send_typing must NOT be wrapped — typing/read indicators are
+# ephemeral platform-side state and don't carry user-visible content.
+# ---------------------------------------------------------------------------
+
+
+def test_telegram_send_typing_not_wrapped():
+    """The decorator's allowlist preserves send_typing as the parent method.
+    Our wrapper sets __qualname__ = '<Subclass>.<method>'; an unwrapped
+    inherited method keeps the parent's qualname."""
+    from mindora_hooks.telegram_mindora import TelegramMindoraAdapter
+    method = TelegramMindoraAdapter.send_typing
+    # If the decorator had wrapped it, qualname would start with
+    # "TelegramMindoraAdapter." Instead it must reference the parent class.
+    assert "TelegramAdapter" in method.__qualname__
+    assert not method.__qualname__.startswith("TelegramMindoraAdapter.")
+
+
+def test_whatsapp_send_typing_not_wrapped():
+    from mindora_hooks.whatsapp_cloud_mindora import WhatsAppCloudMindoraAdapter
+    method = WhatsAppCloudMindoraAdapter.send_typing
+    assert "WhatsAppCloudAdapter" in method.__qualname__
+    assert not method.__qualname__.startswith("WhatsAppCloudMindoraAdapter.")
+
+
+# ---------------------------------------------------------------------------
+# Round-5 P2: Telegram parent's create_handoff_thread() POSTs Bot API directly
+# (forum-topic creation). It's not a send_* name so the decorator misses it;
+# we override explicitly to no-op (return None — matches base.py contract).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_telegram_create_handoff_thread_returns_none():
+    from mindora_hooks.telegram_mindora import TelegramMindoraAdapter
+    adapter = object.__new__(TelegramMindoraAdapter)
+    adapter._tenant_id = "t1"
+    result = await adapter.create_handoff_thread("parent-chat", "Hermes — title")
+    assert result is None
+
+
+def test_telegram_create_handoff_thread_is_overridden():
+    """The Mindora subclass MUST override create_handoff_thread, not inherit
+    TelegramAdapter's version which calls Bot.create_forum_topic() directly."""
+    from mindora_hooks.telegram_mindora import TelegramMindoraAdapter
+    method = TelegramMindoraAdapter.create_handoff_thread
+    assert method.__qualname__.startswith("TelegramMindoraAdapter.")
