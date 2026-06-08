@@ -1435,6 +1435,16 @@ def resolve_provider(
         "ollama": "custom", "ollama_cloud": "ollama-cloud",
         "vllm": "custom", "llamacpp": "custom",
         "llama.cpp": "custom", "llama-cpp": "custom",
+        # Vertex AI via OpenAI-compat proxy (added 2026-06-08).
+        # Routes through the generic custom provider; the runtime trust
+        # check at runtime_provider.py:64-70 alias-normalises cfg_provider
+        # via resolve_provider, so `model.provider: vertex` +
+        # `model.base_url: http://vertex-proxy:4010` is honoured.
+        # Used by mindora-growth-os crm-hermes (Phase 2 M3).
+        "vertex": "custom",
+        "vertex-ai": "custom",
+        "google-vertex": "custom",
+        "google-vertex-ai": "custom",
     }
     # Extend with aliases declared in plugins/model-providers/<name>/ that aren't already mapped.
     # This keeps providers/ as the single source for new aliases while the
