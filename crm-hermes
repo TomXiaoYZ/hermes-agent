@@ -3,8 +3,24 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc git && rm -rf /var/lib/apt/lists/*
 COPY pyproject.toml README.md ./
-RUN pip install --no-cache-dir -e ".[messaging,mindora]"
+# `mcp` extra installs mcp==1.26.0, required by tools/mcp_tool.py to register
+# crm_operations MCP server tools (check_availability, request_booking, etc.).
+# Without it, _MCP_AVAILABLE=False and discover_mcp_tools() returns [], so the
+# agent hallucinates tool calls + fabricates results (verified in production
+# 2026-06-10 via direct probe: `pip show mcp` → Package not found, `discover`
+# returns 0 tools).
+RUN pip install --no-cache-dir -e ".[messaging,mindora,mcp]"
 COPY . .
 RUN pip install --no-cache-dir --no-deps -e .
 ENV PYTHONUNBUFFERED=1
+# Point hermes at /opt/data so it reads /opt/data/config.yaml (mounted by the
+# compose entrypoint from agents/crm/hermes-config/config.yaml). Without this,
+# get_hermes_home() falls back to $HOME/.hermes (= /root/.hermes/, which
+# doesn't exist), and the agent never sees model.provider/base_url/default —
+# resolve_runtime_provider then defaults to api.anthropic.com with model="",
+# returning HTTP 404 on every chat completion. The upstream main Dockerfile
+# already sets this at line 116; this CRM-specific Dockerfile didn't, and
+# mindora-growth-os PR #433 worked around the gap in compose. Defense-in-depth:
+# now both the image and compose set it.
+ENV HERMES_HOME=/opt/data
 CMD ["hermes", "gateway"]
