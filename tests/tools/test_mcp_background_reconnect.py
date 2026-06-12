@@ -357,3 +357,91 @@ class TestEstablishedReconnect:
         assert server._background_pending is True
         await asyncio.wait_for(server.shutdown(), timeout=5)
         assert server._error is None
+
+
+class TestDiscoveryOwnership:
+
+    @pytest.mark.asyncio
+    async def test_normal_startup_single_registration(self, monkeypatch):
+        """Spec test 7: ordinary first connect -> exactly one registration
+        via the sync path; _refresh_tools never invoked."""
+        from tools.mcp_tool import _discover_and_register_server, _servers
+        _fast_backoff(monkeypatch)
+        _patch_run_http(monkeypatch, fail_times=0)
+        mock_registry = ToolRegistry()
+        refresh_calls = []
+        real_refresh = MCPServerTask._refresh_tools
+
+        async def spy_refresh(self):
+            refresh_calls.append(self.name)
+            return await real_refresh(self)
+
+        monkeypatch.setattr(MCPServerTask, "_refresh_tools", spy_refresh)
+        with patch("tools.registry.registry", mock_registry):
+            names = await _discover_and_register_server(
+                "norm_srv", dict(HTTP_CONFIG)
+            )
+            # _patch_run_http sets initialize_result = MagicMock(), whose
+            # truthy capability attrs make _select_utility_schemas register
+            # all 4 resources/prompts utility tools alongside the MCP tool.
+            assert names == [
+                "mcp_norm_srv_ping",
+                "mcp_norm_srv_list_resources",
+                "mcp_norm_srv_read_resource",
+                "mcp_norm_srv_list_prompts",
+                "mcp_norm_srv_get_prompt",
+            ]
+            assert mock_registry.get_all_tool_names().count(
+                "mcp_norm_srv_ping") == 1
+            assert refresh_calls == []
+            server = _servers.pop("norm_srv")
+            assert server._background_pending is False
+            await asyncio.wait_for(server.shutdown(), timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_background_pending_skips_sync_registration(self, monkeypatch):
+        """Spec test 8(a): pending server -> sync path registers nothing and
+        defers; server still tracked in _servers."""
+        from tools.mcp_tool import _discover_and_register_server, _servers
+        _fast_backoff(monkeypatch)
+        _patch_run_http(monkeypatch, fail_times=10**9)
+        mock_registry = ToolRegistry()
+        with patch("tools.registry.registry", mock_registry):
+            names = await _discover_and_register_server(
+                "pend_srv", dict(HTTP_CONFIG)
+            )
+            assert names == []
+            assert mock_registry.get_all_tool_names() == []
+            server = _servers.pop("pend_srv")
+            assert server._background_pending is True
+            await asyncio.wait_for(server.shutdown(), timeout=5)
+
+    @pytest.mark.asyncio
+    async def test_sync_skip_even_after_late_registration_completed(self, monkeypatch):
+        """Spec test 8(b): the OTHER ordering — late registration completed
+        fully before the discovery coroutine reaches its skip check. The
+        sticky flag (never cleared) must still skip the sync path."""
+        from tools.mcp_tool import _discover_and_register_server, _servers
+        _fast_backoff(monkeypatch)
+
+        async def fake_start(self, config):
+            # Simulate: background transition happened AND the late connect
+            # already registered before discovery resumed.
+            self._config = config
+            self._background_pending = True
+            self._registered_tool_names = ["mcp_done_srv_ping"]
+            self._ready.set()
+
+        monkeypatch.setattr(MCPServerTask, "start", fake_start)
+        mock_registry = ToolRegistry()
+        with patch(
+            "tools.mcp_tool._register_server_tools"
+        ) as mock_sync_register, patch(
+            "tools.registry.registry", mock_registry
+        ):
+            names = await _discover_and_register_server(
+                "done_srv", dict(HTTP_CONFIG)
+            )
+            assert names == []
+            mock_sync_register.assert_not_called()
+            _servers.pop("done_srv")

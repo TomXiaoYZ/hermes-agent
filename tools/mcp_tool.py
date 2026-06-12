@@ -3262,6 +3262,21 @@ async def _discover_and_register_server(name: str, config: dict) -> List[str]:
     with _lock:
         _servers[name] = server
 
+    if server._background_pending:
+        # Registration ownership transferred to the server's run loop
+        # (MCPServerTask._on_session_ready). Do NOT sync-register here:
+        # the late-connect hook may already be registering concurrently.
+        # The sticky flag — set before _ready, never cleared — is the
+        # race-free signal (spec §3.3: a presence check on
+        # _registered_tool_names is insufficient because _refresh_tools
+        # suspends at list_tools()).
+        logger.info(
+            "MCP server '%s': connection pending in background — tool "
+            "registration deferred until the server becomes reachable",
+            name,
+        )
+        return []
+
     registered_names = _register_server_tools(name, server, config)
     server._registered_tool_names = list(registered_names)
 
