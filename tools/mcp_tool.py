@@ -1732,8 +1732,11 @@ class MCPServerTask:
                     or (retries - _MAX_RECONNECT_RETRIES) % 10 == 1
                 ):
                     # HTTP servers never give up (spec §3.2). At the backoff
-                    # cap, log every 10th attempt only — bounds noise to
-                    # ~1 line / 10 min per unreachable server.
+                    # cap, log every 10th attempt only — ~1 line / 10 min per
+                    # unreachable server in steady state. (One-time wrinkle:
+                    # right after the cap is reached, attempts 7-15 fall in
+                    # neither condition, so there is a single ~9-minute quiet
+                    # stretch between the attempt-6 and attempt-16 lines.)
                     logger.info(
                         "MCP server '%s' still unreachable "
                         "(reconnect attempt %d), retrying in %.0fs: %s",

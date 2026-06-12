@@ -258,7 +258,14 @@ class TestEstablishedReconnect:
     @pytest.mark.asyncio
     async def test_log_throttling_at_backoff_cap(self, monkeypatch, caplog):
         """Spec test 6: beyond the old limit and at the backoff cap, only
-        every 10th attempt logs (INFO); attempts 1..5 still WARN."""
+        every 10th attempt logs (INFO); attempts 1..5 still WARN.
+
+        Both backoff constants are 0.0 so the test runs instantly, which
+        means `backoff < _MAX_BACKOFF_SECONDS` is always False and ONLY the
+        modulo-10 throttle path is exercised. With production constants the
+        pre-cap attempts additionally log via the `backoff < cap` branch
+        (attempt 6 at backoff=32s); that branch is trivially true pre-cap
+        and is not separately tested because it would need real sleeps."""
         import logging
         monkeypatch.setattr("tools.mcp_tool._INITIAL_BACKOFF_SECONDS", 0.0)
         monkeypatch.setattr("tools.mcp_tool._MAX_BACKOFF_SECONDS", 0.0)
