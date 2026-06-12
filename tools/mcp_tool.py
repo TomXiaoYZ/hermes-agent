@@ -1682,18 +1682,23 @@ class MCPServerTask:
                             self._ready.set()
                             return
 
-                    logger.warning(
-                        "MCP server '%s' initial connection failed "
-                        "(attempt %d/%d), retrying in %.0fs: %s",
-                        self.name, initial_retries,
-                        _MAX_INITIAL_CONNECT_RETRIES, backoff, exc,
-                    )
+                    if initial_retries <= _MAX_INITIAL_CONNECT_RETRIES:
+                        # The background-transition iteration already logged
+                        # its own WARNING above — don't also emit a
+                        # misleading "(attempt 4/3)" retry line.
+                        logger.warning(
+                            "MCP server '%s' initial connection failed "
+                            "(attempt %d/%d), retrying in %.0fs: %s",
+                            self.name, initial_retries,
+                            _MAX_INITIAL_CONNECT_RETRIES, backoff, exc,
+                        )
                     await self._sleep_or_shutdown(backoff)
                     backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
                     # Check if shutdown was requested during the sleep
                     if self._shutdown_event.is_set():
-                        self._error = exc
+                        if not self._background_pending:
+                            self._error = exc
                         self._ready.set()
                         return
                     continue
@@ -1707,7 +1712,7 @@ class MCPServerTask:
                     return
 
                 retries += 1
-                if retries > _MAX_RECONNECT_RETRIES:
+                if retries > _MAX_RECONNECT_RETRIES and not self._is_http():
                     logger.warning(
                         "MCP server '%s' failed after %d reconnection attempts, "
                         "giving up: %s",
@@ -1715,12 +1720,25 @@ class MCPServerTask:
                     )
                     return
 
-                logger.warning(
-                    "MCP server '%s' connection lost (attempt %d/%d), "
-                    "reconnecting in %.0fs: %s",
-                    self.name, retries, _MAX_RECONNECT_RETRIES,
-                    backoff, exc,
-                )
+                if retries <= _MAX_RECONNECT_RETRIES:
+                    logger.warning(
+                        "MCP server '%s' connection lost (attempt %d/%d), "
+                        "reconnecting in %.0fs: %s",
+                        self.name, retries, _MAX_RECONNECT_RETRIES,
+                        backoff, exc,
+                    )
+                elif (
+                    backoff < _MAX_BACKOFF_SECONDS
+                    or (retries - _MAX_RECONNECT_RETRIES) % 10 == 1
+                ):
+                    # HTTP servers never give up (spec §3.2). At the backoff
+                    # cap, log every 10th attempt only — bounds noise to
+                    # ~1 line / 10 min per unreachable server.
+                    logger.info(
+                        "MCP server '%s' still unreachable "
+                        "(reconnect attempt %d), retrying in %.0fs: %s",
+                        self.name, retries, backoff, exc,
+                    )
                 await self._sleep_or_shutdown(backoff)
                 backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
