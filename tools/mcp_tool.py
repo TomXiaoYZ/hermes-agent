@@ -1536,6 +1536,20 @@ class MCPServerTask:
             )
         self._ready.set()
 
+    async def _sleep_or_shutdown(self, backoff: float) -> None:
+        """Backoff sleep that wakes immediately on shutdown.
+
+        A plain ``asyncio.sleep`` at the 60s cap would force every
+        ``shutdown()`` / ``/reload mcp`` of a reconnecting server through
+        the 10s timeout-then-cancel fallback in ``shutdown()``.
+        """
+        try:
+            await asyncio.wait_for(
+                self._shutdown_event.wait(), timeout=backoff
+            )
+        except asyncio.TimeoutError:
+            pass
+
     async def run(self, config: dict):
         """Long-lived coroutine: connect, discover tools, wait, disconnect.
 
@@ -1578,7 +1592,7 @@ class MCPServerTask:
 
         retries = 0
         initial_retries = 0
-        backoff = 1.0
+        backoff = _INITIAL_BACKOFF_SECONDS
 
         while True:
             try:
@@ -1637,14 +1651,36 @@ class MCPServerTask:
 
                     initial_retries += 1
                     if initial_retries > _MAX_INITIAL_CONNECT_RETRIES:
-                        logger.warning(
-                            "MCP server '%s' failed initial connection after "
-                            "%d attempts, giving up: %s",
-                            self.name, _MAX_INITIAL_CONNECT_RETRIES, exc,
-                        )
-                        self._error = exc
-                        self._ready.set()
-                        return
+                        if self._is_http():
+                            # Never give up on remote servers: a DNS/network
+                            # gap at startup (e.g. a deploy recreating this
+                            # container and the MCP server simultaneously)
+                            # must not permanently kill the toolset
+                            # (mindora prod incident 2026-06-13). Transfer
+                            # registration ownership to this run loop and
+                            # unblock start() WITHOUT an error. _ready being
+                            # set routes subsequent failures into the
+                            # persistent reconnect branch below.
+                            logger.warning(
+                                "MCP server '%s' initial connection failed "
+                                "after %d attempts — entering background "
+                                "reconnect; tools will register when the "
+                                "server becomes reachable: %s",
+                                self.name, _MAX_INITIAL_CONNECT_RETRIES, exc,
+                            )
+                            self._background_pending = True
+                            # Invariant: _error stays None so start()
+                            # returns cleanly ("pending in background").
+                            self._ready.set()
+                        else:
+                            logger.warning(
+                                "MCP server '%s' failed initial connection after "
+                                "%d attempts, giving up: %s",
+                                self.name, _MAX_INITIAL_CONNECT_RETRIES, exc,
+                            )
+                            self._error = exc
+                            self._ready.set()
+                            return
 
                     logger.warning(
                         "MCP server '%s' initial connection failed "
@@ -1652,7 +1688,7 @@ class MCPServerTask:
                         self.name, initial_retries,
                         _MAX_INITIAL_CONNECT_RETRIES, backoff, exc,
                     )
-                    await asyncio.sleep(backoff)
+                    await self._sleep_or_shutdown(backoff)
                     backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
                     # Check if shutdown was requested during the sleep
@@ -1685,7 +1721,7 @@ class MCPServerTask:
                     self.name, retries, _MAX_RECONNECT_RETRIES,
                     backoff, exc,
                 )
-                await asyncio.sleep(backoff)
+                await self._sleep_or_shutdown(backoff)
                 backoff = min(backoff * 2, _MAX_BACKOFF_SECONDS)
 
                 # Check again after sleeping
