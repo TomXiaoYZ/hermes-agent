@@ -15,11 +15,26 @@ from tools.mcp_tool import MCPServerTask
 from tools.registry import ToolRegistry
 
 
+@pytest.fixture(autouse=True)
+def _isolate_mcp_tool_server_map():
+    """Snapshot/restore the module-level tool→server provenance map.
+
+    _register_server_tools writes into mcp_tool._mcp_tool_server_names via
+    _track_mcp_tool_server; without this, registrations leak across tests.
+    """
+    from tools import mcp_tool
+    snapshot = dict(mcp_tool._mcp_tool_server_names)
+    yield
+    mcp_tool._mcp_tool_server_names.clear()
+    mcp_tool._mcp_tool_server_names.update(snapshot)
+
+
 def _make_mcp_tool(name: str, desc: str = ""):
     return SimpleNamespace(name=name, description=desc, inputSchema=None)
 
 
 def _make_session(tools):
+    """Mock MCP session whose list_tools() resolves to the given tools."""
     return SimpleNamespace(
         list_tools=AsyncMock(return_value=SimpleNamespace(tools=tools))
     )

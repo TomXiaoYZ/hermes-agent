@@ -1521,7 +1521,14 @@ class MCPServerTask:
             and not self._registered_tool_names
             and self._tools
         ):
-            await self._refresh_tools()
+            try:
+                await self._refresh_tools()
+            except Exception:
+                logger.warning(
+                    "MCP server '%s': late tool registration failed; "
+                    "will retry on next reconnect", self.name,
+                )
+                raise
             logger.warning(
                 "MCP server '%s': background reconnect succeeded — "
                 "registered %d tool(s)",
