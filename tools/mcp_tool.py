@@ -262,6 +262,7 @@ _DEFAULT_CONNECT_TIMEOUT = 60    # seconds for initial connection per server
 _MAX_RECONNECT_RETRIES = 5
 _MAX_INITIAL_CONNECT_RETRIES = 3 # retries for the very first connection attempt
 _MAX_BACKOFF_SECONDS = 60
+_INITIAL_BACKOFF_SECONDS = 1.0   # first retry delay; doubles up to _MAX_BACKOFF_SECONDS
 
 # Environment variables that are safe to pass to stdio subprocesses
 _SAFE_ENV_KEYS = frozenset({
@@ -1024,7 +1025,7 @@ class MCPServerTask:
         "_task", "_ready", "_shutdown_event", "_reconnect_event",
         "_tools", "_error", "_config",
         "_sampling", "_registered_tool_names", "_auth_type", "_refresh_lock",
-        "_rpc_lock", "_pending_refresh_tasks",
+        "_rpc_lock", "_pending_refresh_tasks", "_background_pending",
         "initialize_result",
     )
 
@@ -1046,6 +1047,12 @@ class MCPServerTask:
         self._config: dict = {}
         self._sampling: Optional[SamplingHandler] = None
         self._registered_tool_names: list[str] = []
+        # Sticky ownership flag (spec 2026-06-13-hermes-mcp-reconnect §3.1):
+        # set when initial HTTP connection retries are exhausted and the run
+        # loop keeps retrying in the background. Once set it is NEVER
+        # cleared — _discover_and_register_server skips its sync
+        # registration permanently and _on_session_ready owns registration.
+        self._background_pending: bool = False
         self._auth_type: str = ""
         self._refresh_lock = asyncio.Lock()
         # MCP stdio sessions are a single JSON-RPC stream. Some servers emit
@@ -1309,9 +1316,7 @@ class MCPServerTask:
                     read_stream, write_stream, **sampling_kwargs
                 ) as session:
                     self.initialize_result = await session.initialize()
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
+                    await self._on_session_ready(session)
                     # stdio transport does not use OAuth, but we still honor
                     # _reconnect_event (e.g. future manual /mcp refresh) for
                     # consistency with _run_http.
@@ -1409,9 +1414,7 @@ class MCPServerTask:
                     read_stream, write_stream, **sampling_kwargs
                 ) as session:
                     self.initialize_result = await session.initialize()
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
+                    await self._on_session_ready(session)
                     reason = await self._wait_for_lifecycle_event()
                     if reason == "reconnect":
                         logger.info(
@@ -1456,9 +1459,7 @@ class MCPServerTask:
                 ):
                     async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
                         self.initialize_result = await session.initialize()
-                        self.session = session
-                        await self._discover_tools()
-                        self._ready.set()
+                        await self._on_session_ready(session)
                         reason = await self._wait_for_lifecycle_event()
                         if reason == "reconnect":
                             logger.info(
@@ -1479,9 +1480,7 @@ class MCPServerTask:
             ):
                 async with ClientSession(read_stream, write_stream, **sampling_kwargs) as session:
                     self.initialize_result = await session.initialize()
-                    self.session = session
-                    await self._discover_tools()
-                    self._ready.set()
+                    await self._on_session_ready(session)
                     reason = await self._wait_for_lifecycle_event()
                     if reason == "reconnect":
                         logger.info(
@@ -1500,6 +1499,35 @@ class MCPServerTask:
             if hasattr(tools_result, "tools")
             else []
         )
+
+    async def _on_session_ready(self, session) -> None:
+        """Shared post-initialize sequence for all transport branches.
+
+        Assigns the session, discovers tools, performs the late first-time
+        registration when this server entered background-reconnect mode
+        before ever registering, and signals readiness.
+
+        Idempotency across reconnects comes from the empty-name check, NOT
+        from clearing ``_background_pending`` — the flag must stay sticky,
+        otherwise the discovery coroutine could resume after a completed
+        late registration, read False at its skip check, and register the
+        same tools a second time. For a background-owned server this run
+        loop is the only writer of ``_registered_tool_names``.
+        """
+        self.session = session
+        await self._discover_tools()
+        if (
+            self._background_pending
+            and not self._registered_tool_names
+            and self._tools
+        ):
+            await self._refresh_tools()
+            logger.warning(
+                "MCP server '%s': background reconnect succeeded — "
+                "registered %d tool(s)",
+                self.name, len(self._registered_tool_names),
+            )
+        self._ready.set()
 
     async def run(self, config: dict):
         """Long-lived coroutine: connect, discover tools, wait, disconnect.
